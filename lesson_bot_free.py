@@ -31,7 +31,8 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 # Pollinations.ai — free, open-source, no API key or signup required.
-POLLINATIONS_BASE = "https://image.pollinations.ai/prompt/"
+POLLINATIONS_IMAGE_BASE = "https://image.pollinations.ai/prompt/"
+POLLINATIONS_TEXT_URL = "https://text.pollinations.ai/openai"
 
 
 def load_lessons():
@@ -80,7 +81,7 @@ def send_telegram_message(text: str):
 def fetch_pollinations_image(prompt: str) -> bytes:
     """Fetches a free AI-generated image from Pollinations.ai (no key needed)."""
     encoded_prompt = urllib.parse.quote(prompt)
-    url = f"{POLLINATIONS_BASE}{encoded_prompt}?width=1024&height=576&nologo=true"
+    url = f"{POLLINATIONS_IMAGE_BASE}{encoded_prompt}?width=1024&height=576&nologo=true"
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     with urllib.request.urlopen(req, timeout=60) as resp:
         return resp.read()
@@ -112,6 +113,99 @@ def send_telegram_photo(image_bytes: bytes, caption: str = ""):
     except urllib.error.HTTPError as e:
         print("Telegram sendPhoto failed:", e.read().decode("utf-8"))
         raise
+
+
+def save_lessons(lessons):
+    with open(LESSONS_FILE, "w") as f:
+        json.dump(lessons, f, indent=2)
+
+
+def generate_new_lesson(existing_topics: list) -> dict:
+    """Generates one new lesson (topic, body, code, homework, image_prompt)
+    using Pollinations.ai's free text API (no key needed). Returns None if
+    generation or validation fails, so the caller can skip gracefully."""
+
+    avoid_list = "; ".join(existing_topics)
+    system_prompt = (
+        "You are writing one lesson for a daily Solidity/smart-contract-development "
+        "course delivered over Telegram. Respond with ONLY a raw JSON object, no markdown "
+        "fences, no commentary, matching exactly this schema:\n"
+        '{"topic": "short topic title", '
+        '"body": "400-600 word explanation ending with a Further Reading section listing '
+        '2-4 real URLs (official Solidity docs, Ethereum.org, OpenZeppelin docs, or a known '
+        'security firm blog)", '
+        '"code": "a complete, correct Solidity code example starting with '
+        '// SPDX-License-Identifier: MIT and pragma solidity ^0.8.20;", '
+        '"homework": "one practice task related to the topic", '
+        '"image_prompt": "a short prompt for a minimalist flat-design tech illustration, '
+        'blue and purple color scheme, representing the concept"}'
+    )
+    user_prompt = (
+        "Pick ONE intermediate-to-advanced Solidity/smart-contract topic NOT already "
+        f"covered in this course. Already-covered topics: {avoid_list}. "
+        "Write the full lesson now as raw JSON only."
+    )
+
+    body = json.dumps({
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "model": "openai",
+        "jsonMode": True,
+        "private": True,
+        "seed": os.urandom(4).hex(),
+    }).encode("utf-8")
+
+    req = urllib.request.Request(
+        POLLINATIONS_TEXT_URL,
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(req, timeout=90) as resp:
+            raw = resp.read().decode("utf-8")
+    except Exception as e:
+        print(f"Pollinations text generation request failed: {e}")
+        return None
+
+    # The endpoint may return an OpenAI-style chat completion object,
+    # or raw text depending on mode -- handle both.
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict) and "choices" in parsed:
+            content = parsed["choices"][0]["message"]["content"]
+        else:
+            content = raw
+    except json.JSONDecodeError:
+        content = raw
+
+    content = content.strip()
+    if content.startswith("```"):
+        content = content.strip("`")
+        content = content.split("\n", 1)[-1] if "\n" in content else content
+
+    try:
+        lesson = json.loads(content)
+    except json.JSONDecodeError as e:
+        print(f"Could not parse generated lesson as JSON: {e}")
+        return None
+
+    required_fields = ["topic", "body", "code", "homework", "image_prompt"]
+    if not all(lesson.get(f) for f in required_fields):
+        print("Generated lesson missing required fields, skipping.")
+        return None
+
+    if "SPDX-License-Identifier" not in lesson["code"]:
+        lesson["code"] = "// SPDX-License-Identifier: MIT\npragma solidity ^0.8.20;\n\n" + lesson["code"]
+
+    if lesson["topic"].strip().lower() in [t.strip().lower() for t in existing_topics]:
+        print("Generated lesson duplicates an existing topic, skipping.")
+        return None
+
+    return lesson
 
 
 def send_telegram_document(filename: str, content: str, caption: str = ""):
@@ -183,6 +277,20 @@ def main():
         send_telegram_message(f"HOMEWORK\n{'-'*30}\n\n{lesson['homework']}")
 
     print(f"Sent lesson {idx + 1}: {lesson['topic']}")
+
+    # 5. Grow the curriculum: whenever we've just sent the LAST lesson in the
+    # current rotation, generate one new lesson (free, via Pollinations.ai)
+    # and append it so the list never runs out of fresh content.
+    if idx == len(lessons) - 1:
+        print("End of rotation reached -- generating a new lesson...")
+        existing_topics = [l["topic"] for l in lessons]
+        new_lesson = generate_new_lesson(existing_topics)
+        if new_lesson:
+            lessons.append(new_lesson)
+            save_lessons(lessons)
+            print(f"Added new lesson: {new_lesson['topic']} (curriculum now {len(lessons)} lessons)")
+        else:
+            print("Lesson generation failed or was invalid -- curriculum unchanged this run.")
 
 
 if __name__ == "__main__":
