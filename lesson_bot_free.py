@@ -208,6 +208,15 @@ def generate_new_lesson(existing_topics: list) -> dict:
     return lesson
 
 
+def youtube_search_link(topic: str) -> str:
+    """Builds a live YouTube search URL for the lesson topic. This is
+    intentionally a search link rather than a hardcoded video URL -- specific
+    video links go stale or get deleted, but a search query always resolves
+    to real, current, relevant results."""
+    query = urllib.parse.quote(f"{topic} solidity smart contract")
+    return f"https://www.youtube.com/results?search_query={query}"
+
+
 def send_telegram_document(filename: str, content: str, caption: str = ""):
     """Sends a text file as a document attachment using multipart/form-data,
     built manually so no extra pip dependencies (like 'requests') are needed."""
@@ -276,9 +285,14 @@ def main():
     if lesson.get("homework"):
         send_telegram_message(f"HOMEWORK\n{'-'*30}\n\n{lesson['homework']}")
 
+    # 5. Video: a live YouTube search link for this topic (not a hardcoded
+    # video, so it never goes stale or 404s)
+    video_url = youtube_search_link(lesson["topic"])
+    send_telegram_message(f"WATCH MORE ON THIS TOPIC\n{'-'*30}\n\n{video_url}")
+
     print(f"Sent lesson {idx + 1}: {lesson['topic']}")
 
-    # 5. Grow the curriculum: whenever we've just sent the LAST lesson in the
+    # 6. Grow the curriculum: whenever we've just sent the LAST lesson in the
     # current rotation, generate one new lesson (free, via Pollinations.ai)
     # and append it so the list never runs out of fresh content.
     if idx == len(lessons) - 1:
